@@ -114,6 +114,17 @@ class ShellJson(Sandbox):
         self.assertEqual([e["id"] for e in cfg["bar"]["layout"]["center"]], [ID])
         self.assertEqual([e["id"] for e in cfg["plugins"]], [ID])
 
+    def test_concurrent_edits_keep_the_file_valid_and_the_entry_unique(self):
+        self.write(self.shell_json, json.dumps({"version": 1, "idle": {"lock": 600}, "bar": {"layout": {"left": [], "center": [], "right": []}}}))
+        sections = ["left", "center", "right", "hidden"] * 4
+        with cf.ThreadPoolExecutor(8) as ex:
+            list(ex.map(lambda s: self.run_cli("bar", s), sections))
+        cfg = json.loads(self.read(self.shell_json))
+        self.assertEqual(cfg["idle"], {"lock": 600})
+        mentions = sum(1 for sec in cfg["bar"]["layout"].values() for e in sec if e.get("id") == ID)
+        self.assertLessEqual(mentions, 1)
+        self.assertEqual([e["id"] for e in cfg["plugins"]].count(ID), 1)
+
     def test_placement_round_trip(self):
         for section in ("left", "right", "center"):
             self.assertTrue(self.run_cli("bar", section)["ok"])
@@ -361,6 +372,25 @@ class UpdateNotifications(Sandbox):
         self.assertFalse(os.path.exists(self.last_check_file()))
         os.remove(self.fail_flag)
         self.assertEqual(self.run_cli("check-updates")["notified"], ["foo"])   # retried without --force
+
+    def test_unreachable_upstream_neither_forgets_nor_uses_up_the_day(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        self.advance("foo", "v2\n")
+        self.assertEqual(self.run_cli("check-updates")["notified"], ["foo"])
+        self.assertEqual(len(self.notifications()), 1)
+        # Day passes, and the network is down: the fetch fails.
+        self.write(self.last_check_file(), json.dumps({"at": __import__("time").time() - 25 * 3600}))
+        seed, bare = self.repos["foo"]
+        os.rename(bare, bare + ".offline")
+        res = self.run_cli("check-updates")
+        self.assertEqual(res["unreachable"], ["foo"])
+        self.assertEqual(json.loads(self.read(self.last_check_file()))["at"] < __import__("time").time() - 24 * 3600, True)
+        # Back online: the same commit must not be announced a second time.
+        os.rename(bare + ".offline", bare)
+        res = self.run_cli("check-updates")
+        self.assertEqual(res["notified"], [])
+        self.assertEqual(len(self.notifications()), 1)
 
     def test_a_corrupt_timestamp_is_ignored(self):
         self.add_theme("foo")

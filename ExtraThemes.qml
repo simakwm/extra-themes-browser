@@ -30,6 +30,11 @@ Item {
   property var outdated: []
   property var busy: ({})                // slug -> verb in progress
   property var filtered: []
+  // Responses can arrive out of order (each action reloads the catalog); only the
+  // latest request of each kind may update the view.
+  property int catalogSeq: 0
+  property int statusSeq: 0
+  property int settingsSeq: 0
 
   // fullscreen preview
   property int previewIndex: -1          // index into `filtered`, -1 = closed
@@ -80,8 +85,18 @@ Item {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
-  function dismiss() {
+  // The shell calls this when something else hides the popup (`shell hide`, or the
+  // second press of the shortcut or bar icon, which toggle). Without it the popup
+  // stayed on screen while the shell believed it was closed.
+  function close() {
     opened = false
+    previewIndex = -1
+    editingShortcut = false
+    cleanupPending = false
+  }
+
+  function dismiss() {
+    close()
     if (shell && typeof shell.hide === "function")
       shell.hide((manifest && manifest.id) || "io.github.simakwm.extra-themes")
   }
@@ -130,7 +145,9 @@ Item {
 
   function loadCatalog(force) {
     loading = true
+    var seq = ++catalogSeq
     call(force ? ["catalog", "--refresh"] : ["catalog"], function(rows) {
+      if (seq !== catalogSeq) return
       loading = false
       if (Array.isArray(rows)) {
         loadError = ""
@@ -144,7 +161,9 @@ Item {
 
   function checkUpdates() {
     checking = true
+    var seq = ++statusSeq
     call(["status"], function(res) {
+      if (seq !== statusSeq) return
       checking = false
       if (res && Array.isArray(res.outdated)) {
         outdated = res.outdated
@@ -267,7 +286,14 @@ Item {
 
   // ── settings ───────────────────────────────────────────────
   function loadSettings() {
-    call(["settings"], function(r) { if (r && r.bar) settings = r })
+    var seq = ++settingsSeq
+    call(["settings"], function(r) { if (seq === settingsSeq && r && r.bar) settings = r })
+  }
+
+  // Show the new value at once: key repeat sends the next press before the
+  // backend answers, and it must start from what the user just did.
+  function patchSettings(patch) {
+    settings = Object.assign({}, settings, patch)
   }
 
   function openSettings() {
@@ -301,7 +327,9 @@ Item {
 
   function cycleBarSection(d) {
     var i = barOptions.indexOf(settings.bar.section)
-    setBarSection(barOptions[(i + d + barOptions.length) % barOptions.length])
+    var next = barOptions[(i + d + barOptions.length) % barOptions.length]
+    patchSettings({ bar: Object.assign({}, settings.bar, { section: next }) })
+    setBarSection(next)
   }
 
   function nudgeIcon(d) {
@@ -309,13 +337,17 @@ Item {
   }
 
   function toggleMenuEntry() {
-    change(["menu", settings.menu ? "off" : "on"],
-      settings.menu ? "Removed from the Omarchy menu" : "Added to the Omarchy menu under Style › Extra Themes")
+    var on = !settings.menu
+    patchSettings({ menu: on })
+    change(["menu", on ? "on" : "off"],
+      on ? "Added to the Omarchy menu under Style › Extra Themes" : "Removed from the Omarchy menu")
   }
 
   function toggleNotify() {
-    change(["notify", settings.notify ? "off" : "on"],
-      settings.notify ? "Update notifications turned off" : "You will be notified when installed themes have updates")
+    var on = !settings.notify
+    patchSettings({ notify: on })
+    change(["notify", on ? "on" : "off"],
+      on ? "You will be notified when installed themes have updates" : "Update notifications turned off")
   }
 
   function startShortcutEdit() {
@@ -397,6 +429,7 @@ Item {
       return (b.t.favorite - a.t.favorite) || (b.t.installed - a.t.installed) || (a.i - b.i)
     }).map(function(x) { return x.t })
     filtered = out
+    if (previewIndex >= out.length) previewIndex = out.length - 1   // -1 closes it
 
     // The selection follows the theme, not the row, so reordering never
     // moves the cursor onto a different theme.
@@ -428,6 +461,7 @@ Item {
     if (!t) return
     if (!t.installed) act("install", t)
     else if (!t.active) act("apply", t)
+    else notify(t.name + " is already the active theme", false)
   }
 
   function tabLabel(name) {
@@ -1002,6 +1036,7 @@ Item {
                       id: preview
                       anchors.fill: parent
                       source: cell.t ? cell.t.image : ""
+                      sourceSize.width: 720
                       asynchronous: true
                       fillMode: Image.PreserveAspectCrop
                       opacity: cell.verb ? 0.35 : 1

@@ -130,26 +130,29 @@ def catalog(refresh):
 
 
 def upstream_sha(slug):
-    """Commit the theme's upstream is at, if that is ahead of what is installed; else ''."""
+    """Commit the theme's upstream is at if that is ahead of what is installed, '' if it is
+    up to date, None if we could not tell (offline, timeout, a concurrent fetch)."""
     d = f"{THEMES}/{slug}"
     try:
         subprocess.run(["git", "-C", d, "fetch", "--quiet"], timeout=30, check=True,
                        stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         n = subprocess.run(["git", "-C", d, "rev-list", "--count", "HEAD..@{u}"],
-                           capture_output=True, text=True, timeout=10).stdout.strip()
+                           capture_output=True, text=True, timeout=10, check=True).stdout.strip()
         if int(n or 0) <= 0:
             return ""
         return subprocess.run(["git", "-C", d, "rev-parse", "@{u}"],
-                              capture_output=True, text=True, timeout=10).stdout.strip()
+                              capture_output=True, text=True, timeout=10, check=True).stdout.strip()
     except Exception:
-        return ""
+        return None
 
 
 def status():
-    slugs = [os.path.basename(d) for d in os.listdir(THEMES) if is_git_theme(os.path.basename(d))] if os.path.isdir(THEMES) else []
+    slugs = [d for d in os.listdir(THEMES) if is_git_theme(d)] if os.path.isdir(THEMES) else []
     with cf.ThreadPoolExecutor(8) as ex:
-        upstream = {s: sha for s, sha in zip(slugs, ex.map(upstream_sha, slugs)) if sha}
-    return {"outdated": sorted(upstream), "upstream": upstream}
+        results = dict(zip(slugs, ex.map(upstream_sha, slugs)))
+    upstream = {s: sha for s, sha in results.items() if sha}
+    return {"outdated": sorted(upstream), "upstream": upstream,
+            "failed": sorted(s for s, sha in results.items() if sha is None)}
 
 
 def run(cmd):
@@ -551,12 +554,14 @@ def check_updates(force=False):
     last = stamp.get("at") if isinstance(stamp, dict) else None
     if not force and isinstance(last, (int, float)) and 0 <= time.time() - last < CHECK_INTERVAL:
         return {"ok": True, "skipped": "checked recently"}
-    current = status()["upstream"]
+    result = status()
+    current, failed = result["upstream"], set(result["failed"])
     seen = read_json(NOTIFIED_FILE, {})
     seen = seen if isinstance(seen, dict) else {}
     fresh = sorted(s for s, sha in current.items() if seen.get(s) != sha)
-    # Forget themes that are no longer behind, so a later update notifies again.
-    keep = {s: sha for s, sha in seen.items() if s in current}
+    # Forget themes that are no longer behind, so a later update notifies again, but
+    # keep the ones we could not reach (offline): they would be announced twice.
+    keep = {s: sha for s, sha in seen.items() if s in current or s in failed}
     if fresh:
         try:
             sent = send_update_notification(fresh)
@@ -568,6 +573,9 @@ def check_updates(force=False):
             return {"ok": False, "error": "could not send the notification", "outdated": sorted(current)}
         keep.update({s: current[s] for s in fresh})
     write_atomic(NOTIFIED_FILE, json.dumps(keep))
+    if failed:
+        # Part of the picture is missing, so this was not a real check: try again next hour.
+        return {"ok": True, "outdated": sorted(current), "notified": fresh, "unreachable": sorted(failed)}
     write_atomic(LAST_CHECK_FILE, json.dumps({"at": time.time()}))
     return {"ok": True, "outdated": sorted(current), "notified": fresh}
 
@@ -607,7 +615,31 @@ def settings():
             "suggested": suggest_shortcut(), "notify": notify_enabled()}
 
 
+WRITES_CONFIG = {"bar", "bar-move", "menu", "shortcut-set", "shortcut-clear", "notify", "cleanup"}
+
+
+class config_lock:
+    """Serialises commands that edit shell.json, the menu file or bindings.lua: the popup
+    fires one process per key press, and two read-modify-write cycles must not interleave."""
+
+    def __enter__(self):
+        os.makedirs(STATE, exist_ok=True)
+        self.f = open(f"{STATE}/.config.lock", "w")
+        fcntl.flock(self.f, fcntl.LOCK_EX)
+
+    def __exit__(self, *exc):
+        self.f.close()
+
+
 def main(argv):
+    cmd = argv[1] if len(argv) > 1 else ""
+    if cmd in WRITES_CONFIG:
+        with config_lock():
+            return dispatch(argv)
+    return dispatch(argv)
+
+
+def dispatch(argv):
     cmd, args = (argv[1] if len(argv) > 1 else ""), argv[2:]
     if cmd == "catalog":
         res = catalog("--refresh" in args)
