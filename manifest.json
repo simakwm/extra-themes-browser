@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.simakwm.extra-themes",
+  "name": "Extra Themes",
+  "version": "1.2.0",
+  "author": "simakwm",
+  "license": "MIT",
+  "homepage": "https://github.com/simakwm/omarchy-extra-themes",
+  "repository": "https://github.com/simakwm/omarchy-extra-themes",
+  "description": "Browse, search, install, uninstall, favorite, and update Omarchy extra themes from omarchy.org",
+  "kinds": ["overlay", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "ExtraThemes.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Extra Themes",
+    "description": "Opens the Extra Themes browser",
+    "category": "Appearance",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
