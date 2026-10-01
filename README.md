@@ -11,10 +11,17 @@ keyboard shortcut.
 
 ```bash
 omarchy plugin add https://github.com/simakwm/omarchy-extra-themes.git
+```
+
+Omarchy shows a security notice, then asks whether to enable the plugin and, for
+a bar widget, which section of the bar the icon goes in. Answer yes. If you
+answer no, or add it with `--yes` (which never enables), run:
+
+```bash
 omarchy plugin enable io.github.simakwm.extra-themes
 ```
 
-Plugins are added disabled so you can read the code first. Then open it:
+Open it with the bar icon, or from anywhere with:
 
 ```bash
 omarchy-shell shell toggle io.github.simakwm.extra-themes
@@ -23,10 +30,10 @@ omarchy-shell shell toggle io.github.simakwm.extra-themes
 You can also place the icon on the bar, add a menu entry or register a
 shortcut from the popup itself: **⚙ Settings**, or `Ctrl+,`.
 
-**No icon on the bar?** `omarchy plugin enable` only places the icon when the
-plugin is not yet in your `shell.json`, so after a reinstall it may be enabled
-but not on the bar. Open the popup with the command above, go to **Settings →
-Top bar icon** and pick Left, Center or Right.
+**No icon on the bar?** Omarchy only places the icon when the plugin is not yet
+in your `shell.json`, so after a reinstall it may be enabled but not on the bar.
+Open the popup with the command above, go to **Settings → Top bar icon** and
+pick Left, Center or Right.
 
 ## Features
 
