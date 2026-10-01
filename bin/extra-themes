@@ -18,6 +18,7 @@
   cleanup               remove the bar icon, menu entry, shortcut, favorites and cache
 """
 import concurrent.futures as cf
+import fcntl
 import html
 import json
 import os
@@ -85,7 +86,7 @@ def fetch_catalog(refresh):
         except (OSError, ValueError):
             raise
     os.makedirs(CACHE, exist_ok=True)
-    json.dump(items, open(path, "w"))
+    write_atomic(path, json.dumps(items))
     return items
 
 
@@ -102,8 +103,13 @@ def is_git_theme(slug):
 
 
 def active_slug():
-    p = subprocess.run(["omarchy", "theme", "current"], capture_output=True, text=True, stdin=subprocess.DEVNULL)
-    return re.sub(r"\s+", "-", p.stdout.strip().lower())
+    """Folder name of the active theme. `omarchy theme current` only prettifies this
+    file ("castle-on-a-lake" -> "Castle On A Lake"), so read the original."""
+    try:
+        with open(f"{HOME}/.local/state/omarchy/current/theme.name") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
 
 
 def catalog(refresh):
@@ -151,9 +157,12 @@ def need_slug(arg):
 
 def toggle_favorite(slug):
     need_slug(slug)
-    favs = favorites() ^ {slug}
     os.makedirs(STATE, exist_ok=True)
-    json.dump(sorted(favs), open(f"{STATE}/favorites.json", "w"))
+    # Two quick toggles are two processes; the lock keeps one from undoing the other.
+    with open(f"{STATE}/.lock", "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        favs = favorites() ^ {slug}
+        write_atomic(f"{STATE}/favorites.json", json.dumps(sorted(favs)))
     return {"ok": True, "favorite": slug in favs}
 
 
@@ -162,7 +171,7 @@ def toggle_favorite(slug):
 def write_atomic(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = f"{path}.tmp{os.getpid()}"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
     os.replace(tmp, path)
 
@@ -175,20 +184,54 @@ def read_text(path):
 
 
 def entry_id(e):
-    return e if isinstance(e, str) else (e or {}).get("id")
+    if isinstance(e, str):
+        return e
+    return e.get("id") if isinstance(e, dict) else None
 
 
-def load_shell_json():
+DEFAULTS_JSON = f"{os.environ.get('OMARCHY_PATH', '/usr/share/omarchy')}/config/omarchy/shell.json"
+
+
+def load_shell_json(strict=False):
+    """The user's shell.json.
+
+    A missing or empty file means Omarchy's defaults, so a writer starts from
+    those rather than replacing them with a bare layout. A file that cannot be
+    read or parsed is never replaced: writers (strict) stop with an error,
+    readers just see nothing."""
     try:
-        return json.load(open(SHELL_JSON))
-    except (OSError, ValueError):
+        text = open(SHELL_JSON).read()
+    except FileNotFoundError:
+        text = ""
+    except OSError as e:
+        if strict:
+            sys.exit(f"cannot read {SHELL_JSON}: {e}")
         return {}
+    if not text.strip():
+        try:
+            return json.load(open(DEFAULTS_JSON)) if strict else {}
+        except (OSError, ValueError):
+            return {}
+    try:
+        cfg = json.loads(text)
+    except ValueError as e:
+        if strict:
+            sys.exit(f"shell.json is not valid JSON ({e}); leaving it untouched")
+        return {}
+    if not isinstance(cfg, dict):
+        if strict:
+            sys.exit("shell.json is not a JSON object; leaving it untouched")
+        return {}
+    return cfg
 
 
 def bar_state():
-    layout = (load_shell_json().get("bar") or {}).get("layout") or {}
+    bar = load_shell_json().get("bar")
+    layout = bar.get("layout") if isinstance(bar, dict) else None
+    layout = layout if isinstance(layout, dict) else {}
     for section in ("left", "center", "right"):
-        ids = [entry_id(e) for e in layout.get(section) or []]
+        items = layout.get(section)
+        ids = [entry_id(e) for e in items] if isinstance(items, list) else []
         if PLUGIN_ID in ids:
             return {"section": section, "index": ids.index(PLUGIN_ID), "count": len(ids)}
     return {"section": "hidden", "index": 0, "count": 0}
@@ -200,30 +243,40 @@ def reload_shell():
 
 
 def save_shell_json(cfg):
-    write_atomic(SHELL_JSON, json.dumps(cfg, indent=2, sort_keys=True) + "\n")
+    write_atomic(SHELL_JSON, json.dumps(cfg, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
     reload_shell()
 
 
 def layout_of(cfg):
     """bar.layout with all three sections present."""
-    bar = cfg.setdefault("bar", {})
-    layout = bar.setdefault("layout", {})
+    if not isinstance(cfg.get("bar"), dict):
+        cfg["bar"] = {}
+    if not isinstance(cfg["bar"].get("layout"), dict):
+        cfg["bar"]["layout"] = {}
+    layout = cfg["bar"]["layout"]
     for section in ("left", "center", "right"):
-        layout.setdefault(section, [])
+        if not isinstance(layout.get(section), list):
+            layout[section] = []
     return layout
+
+
+def plugins_of(cfg):
+    if not isinstance(cfg.get("plugins"), list):
+        cfg["plugins"] = []
+    return cfg["plugins"]
 
 
 def keep_plugin_enabled(cfg):
     """The popup itself lives under plugins[]; a bar widget alone would tie its
     "enabled" state to being on the bar, so hiding the icon would break summon."""
-    plugins = cfg.setdefault("plugins", [])
+    plugins = plugins_of(cfg)
     if not any(entry_id(e) == PLUGIN_ID for e in plugins):
         plugins.append({"id": PLUGIN_ID})
 
 
 def place(section, index=None):
     """Move the icon to `section` (None removes it from the bar) at `index` (None = end)."""
-    cfg = load_shell_json()
+    cfg = load_shell_json(strict=True)
     layout = layout_of(cfg)
     entry = {"id": PLUGIN_ID}
     for sec in layout:
@@ -278,9 +331,16 @@ def menu_state():
 
 
 def menu_set(on):
-    text = read_text(MENU_FILE) or "{\n}\n"
-    text = MENU_BLOCK.sub("", text)
+    original = read_text(MENU_FILE)
+    if not on and not MENU_BLOCK.search(original):
+        return {"ok": True}                      # nothing to remove; don't touch the file
+    text = MENU_BLOCK.sub("", original or "{\n}\n")
     if on:
+        # The menu parser keeps only whole-line comments, so a trailing `// note`
+        # makes the file unreadable for it already; say so instead of guessing.
+        if original and not jsonc_valid(original):
+            sys.exit("omarchy-menu.jsonc is not valid for the Omarchy menu parser "
+                     "(inline // comments are not supported); fix it first")
         end = text.rstrip().rfind("}")
         if end < 0:
             sys.exit("menu extension file is not an object")
@@ -297,8 +357,8 @@ def menu_set(on):
         head = "\n".join(lines)
         head = head if head.endswith("\n") else head + "\n"
         text = head + block + tail
-    if not jsonc_valid(text):
-        sys.exit("refusing to write: menu file would not parse")
+        if not jsonc_valid(text):
+            sys.exit("refusing to write: menu file would not parse")
     write_atomic(MENU_FILE, text)
     return {"ok": True}
 
@@ -353,21 +413,37 @@ def conflict(mask, key):
 
 
 def hypr_errors():
-    p = subprocess.run(["hyprctl", "configerrors"], capture_output=True, text=True, timeout=5)
+    try:
+        p = subprocess.run(["hyprctl", "configerrors"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        sys.exit(f"hyprctl is not available: {e}")
     return p.stdout.strip()
 
 
 def shortcut_write(text, before_errors):
-    """Write bindings.lua, reload, and roll back if Hyprland reports new errors."""
+    """Write bindings.lua, reload, and roll back if Hyprland fails or reports new errors."""
     old = read_text(BINDINGS)
     write_atomic(BINDINGS, text)
-    subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10)
-    time.sleep(0.6)
-    after = hypr_errors()
-    if after and after != before_errors:
-        write_atomic(BINDINGS, old)
+    problem = ""
+    try:
         subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10)
-        sys.exit("Hyprland rejected the binding: " + after[:200])
+        for _ in range(3):                      # give a slow reload time to report
+            time.sleep(0.4)
+            after = hypr_errors()
+            if after and after != before_errors:
+                problem = "Hyprland rejected the binding: " + after[:200]
+                break
+    except (OSError, subprocess.TimeoutExpired) as e:
+        problem = f"could not reload Hyprland: {e}"
+    except SystemExit as e:
+        problem = str(e.code)
+    if problem:
+        write_atomic(BINDINGS, old)
+        try:
+            subprocess.run(["hyprctl", "reload"], capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+        sys.exit(problem)
 
 
 def shortcut_set(raw):
@@ -413,11 +489,11 @@ def cleanup():
             errors.append(f"{type(e).__name__}: {e}")
 
     def unregister():
-        cfg = load_shell_json()
+        cfg = load_shell_json(strict=True)
         layout = layout_of(cfg)
         for sec in layout:
             layout[sec] = [e for e in layout[sec] if entry_id(e) != PLUGIN_ID]
-        cfg["plugins"] = [e for e in cfg.get("plugins", []) if entry_id(e) != PLUGIN_ID]
+        cfg["plugins"] = [e for e in plugins_of(cfg) if entry_id(e) != PLUGIN_ID]
         save_shell_json(cfg)
 
     step(menu_set, False)

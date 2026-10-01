@@ -199,6 +199,13 @@ omarchy restart shell # needed for QML changes, the popup stays loaded
 The plugin is installed as a real directory, not a symlink: the shell refuses
 bar widgets that load through one.
 
+Tests run the backend against a throwaway `HOME` with fake `omarchy`,
+`omarchy-shell` and `hyprctl` commands, so they never touch your session:
+
+```bash
+python3 -m unittest discover tests
+```
+
 ## License
 
 MIT
