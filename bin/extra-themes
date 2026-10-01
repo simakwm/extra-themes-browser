@@ -30,8 +30,8 @@ import urllib.request
 
 HOME = os.path.expanduser("~")
 THEMES = f"{HOME}/.config/omarchy/themes"
-CACHE = f"{os.environ.get('XDG_CACHE_HOME', HOME + '/.cache')}/omarchy-extra-themes"
-STATE = f"{os.environ.get('XDG_STATE_HOME', HOME + '/.local/state')}/omarchy-extra-themes"
+CACHE = f"{os.environ.get('XDG_CACHE_HOME', HOME + '/.cache')}/extra-themes-browser"
+STATE = f"{os.environ.get('XDG_STATE_HOME', HOME + '/.local/state')}/extra-themes-browser"
 DEFAULT_THEME = "Tokyo Night"   # what Omarchy installs with
 PLUGIN_ID = "io.github.simakwm.extra-themes"
 SHELL_JSON = f"{HOME}/.config/omarchy/shell.json"
@@ -69,7 +69,7 @@ def fetch_catalog(refresh):
     except (OSError, ValueError):
         pass
     try:
-        req = urllib.request.Request(f"{SOURCE}/themes/", headers={"User-Agent": "omarchy-extra-themes"})
+        req = urllib.request.Request(f"{SOURCE}/themes/", headers={"User-Agent": "extra-themes-browser"})
         with urllib.request.urlopen(req, timeout=20) as r:
             page = r.read(8 << 20).decode("utf-8", "replace")
         items = [
@@ -260,7 +260,7 @@ def bar_move(delta):
     return {"ok": True} if target == st["index"] else place(st["section"], target)
 
 
-MENU_BLOCK = re.compile(r"[ \t]*// \[omarchy-extra-themes-menu\].*?// \[/omarchy-extra-themes-menu\][ \t]*\n?", re.S)
+MENU_BLOCK = re.compile(r"[ \t]*// \[extra-themes-browser-menu\].*?// \[/extra-themes-browser-menu\][ \t]*\n?", re.S)
 
 
 def jsonc_valid(text):
@@ -274,7 +274,7 @@ def jsonc_valid(text):
 
 
 def menu_state():
-    return "// [omarchy-extra-themes-menu]" in read_text(MENU_FILE)
+    return "// [extra-themes-browser-menu]" in read_text(MENU_FILE)
 
 
 def menu_set(on):
@@ -293,7 +293,7 @@ def menu_set(on):
             if code not in ("{",) and not code.endswith(","):
                 lines[i] = lines[i].rstrip() + ","
             break
-        block = ("  // [omarchy-extra-themes-menu]\n  " + MENU_ENTRY + "\n  // [/omarchy-extra-themes-menu]\n")
+        block = ("  // [extra-themes-browser-menu]\n  " + MENU_ENTRY + "\n  // [/extra-themes-browser-menu]\n")
         head = "\n".join(lines)
         head = head if head.endswith("\n") else head + "\n"
         text = head + block + tail
@@ -310,7 +310,7 @@ NAMED_KEYS = {"SPACE", "RETURN", "TAB", "COMMA", "PERIOD", "SLASH", "SEMICOLON",
               "BRACKETLEFT", "BRACKETRIGHT", "GRAVE", "BACKSPACE", "DELETE", "INSERT", "HOME", "END",
               "PRIOR", "NEXT", "LEFT", "RIGHT", "UP", "DOWN", "PRINT"}
 KEY_OK = re.compile(r"^([A-Z0-9]|F([1-9]|1[0-9]|2[0-4]))$")
-BIND_BLOCK = re.compile(r"\n?-- \[omarchy-extra-themes-keybind\].*?-- \[/omarchy-extra-themes-keybind\]\n?", re.S)
+BIND_BLOCK = re.compile(r"\n?-- \[extra-themes-browser-keybind\].*?-- \[/extra-themes-browser-keybind\]\n?", re.S)
 BIND_LINE = re.compile(r'o\.bind\("([^"]+)", "' + re.escape(BIND_DESC) + '"')
 
 
@@ -376,8 +376,8 @@ def shortcut_set(raw):
     if other:
         sys.exit(f"{combo} is already used by “{other}”")
     text = BIND_BLOCK.sub("\n", read_text(BINDINGS)).rstrip("\n") + "\n"
-    text += (f'\n-- [omarchy-extra-themes-keybind]\no.bind("{combo}", "{BIND_DESC}", "{BIND_CMD}")\n'
-             "-- [/omarchy-extra-themes-keybind]\n")
+    text += (f'\n-- [extra-themes-browser-keybind]\no.bind("{combo}", "{BIND_DESC}", "{BIND_CMD}")\n'
+             "-- [/extra-themes-browser-keybind]\n")
     shortcut_write(text, hypr_errors())
     return {"ok": True}
 

@@ -10,7 +10,7 @@ keyboard shortcut.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/simakwm/omarchy-extra-themes.git
+omarchy plugin add https://github.com/simakwm/extra-themes-browser.git
 ```
 
 Omarchy shows a security notice, then asks whether to enable the plugin and, for
@@ -164,8 +164,8 @@ Nothing outside the plugin's own folder is changed unless you ask for it.
 | `~/.config/omarchy/shell.json` | placing or hiding the bar icon |
 | `~/.config/omarchy/extensions/omarchy-menu.jsonc` | the menu entry (a marked block) |
 | `~/.config/hypr/bindings.lua` | the shortcut (a marked block) |
-| `~/.cache/omarchy-extra-themes/` | cached theme list |
-| `~/.local/state/omarchy-extra-themes/` | your favorites |
+| `~/.cache/extra-themes-browser/` | cached theme list |
+| `~/.local/state/extra-themes-browser/` | your favorites |
 
 Network access: `omarchy.org` (theme list and previews) and the GitHub
 repositories of the themes you install or update.
