@@ -9,6 +9,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -212,6 +213,160 @@ class NoHyprctl(Sandbox):
         self.assertFalse(res["ok"])
         self.assertIn("hyprctl", res["error"])
         self.assertEqual(self.read(self.bindings), original)
+
+
+class UpdateNotifications(Sandbox):
+    """check-updates against real local git repos, with a fake notification sender."""
+
+    def setUp(self):
+        super().setUp()
+        os.symlink(shutil.which("git"), os.path.join(self.shims, "git"))
+        self.log = os.path.join(self.tmp.name, "notifications.log")
+        self.fail_flag = os.path.join(self.tmp.name, "sender_fails")
+        self.shim("omarchy-notification-send",
+                  f'[ -f "{self.fail_flag}" ] && exit 1\nfor a in "$@"; do printf "%s|" "$a" >> "{self.log}"; done\necho >> "{self.log}"')
+        self.git_env = {"PATH": os.environ["PATH"], "HOME": self.tmp.name, "GIT_CONFIG_GLOBAL": "/dev/null",
+                        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t", "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+        self.themes = f"{self.home}/.config/omarchy/themes"
+        os.makedirs(self.themes)
+        self.repos = {}
+
+    def git(self, *args, cwd=None):
+        subprocess.run(["git", *args], cwd=cwd, env=self.git_env, check=True, capture_output=True)
+
+    def add_theme(self, slug):
+        """An installed theme whose upstream we can advance with advance()."""
+        seed = os.path.join(self.tmp.name, f"{slug}-seed")
+        bare = os.path.join(self.tmp.name, f"{slug}.git")
+        self.git("init", "-q", "-b", "main", seed)
+        self.write(os.path.join(seed, "colors.toml"), "v1\n")
+        self.git("add", "-A", cwd=seed)
+        self.git("commit", "-q", "-m", "one", cwd=seed)
+        self.git("clone", "-q", "--bare", seed, bare)
+        self.git("clone", "-q", bare, os.path.join(self.themes, slug))
+        self.repos[slug] = (seed, bare)
+
+    def advance(self, slug, content):
+        seed, bare = self.repos[slug]
+        self.write(os.path.join(seed, "colors.toml"), content)
+        self.git("commit", "-q", "-am", content.strip(), cwd=seed)
+        self.git("push", "-q", bare, "main", cwd=seed)
+
+    def notifications(self):
+        return self.read(self.log).splitlines() if os.path.exists(self.log) else []
+
+    def test_off_by_default_and_does_nothing(self):
+        self.add_theme("foo")
+        self.advance("foo", "v2\n")
+        self.assertFalse(self.run_cli("settings")["notify"])
+        self.assertEqual(self.run_cli("check-updates", "--force")["skipped"], "disabled")
+        self.assertEqual(self.notifications(), [])
+
+    def test_notifies_once_per_new_upstream_commit(self):
+        self.add_theme("foo")
+        self.assertTrue(self.run_cli("notify", "on")["ok"])
+        self.assertTrue(self.run_cli("settings")["notify"])
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], [])      # nothing new yet
+        self.advance("foo", "v2\n")
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], ["foo"])
+        self.assertEqual(len(self.notifications()), 1)
+        self.assertIn("Foo has an update", self.notifications()[0])
+        self.assertIn("summon|" + ID, self.notifications()[0])               # click opens the popup
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], [])      # same commit: silent
+        self.assertEqual(len(self.notifications()), 1)
+        self.advance("foo", "v3\n")                                          # a newer commit notifies again
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], ["foo"])
+        self.assertEqual(len(self.notifications()), 2)
+
+    def test_updating_the_theme_resets_the_memory(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        self.advance("foo", "v2\n")
+        self.run_cli("check-updates", "--force")
+        self.assertTrue(self.run_cli("update", "foo")["ok"])
+        self.assertEqual(self.run_cli("check-updates", "--force")["outdated"], [])
+        self.advance("foo", "v3\n")
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], ["foo"])
+
+    def test_several_themes_make_one_notification(self):
+        for slug in ("foo", "bar"):
+            self.add_theme(slug)
+            self.advance(slug, "v2\n")
+        self.run_cli("notify", "on")
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], ["bar", "foo"])
+        lines = self.notifications()
+        self.assertEqual(len(lines), 1)
+        self.assertIn("2 themes have updates", lines[0])
+
+    def test_a_failed_send_is_retried_not_forgotten(self):
+        self.add_theme("foo")
+        self.advance("foo", "v2\n")
+        self.run_cli("notify", "on")
+        open(self.fail_flag, "w").close()
+        self.assertFalse(self.run_cli("check-updates", "--force")["ok"])
+        os.remove(self.fail_flag)
+        self.assertEqual(self.run_cli("check-updates", "--force")["notified"], ["foo"])
+        self.assertEqual(len(self.notifications()), 1)
+
+    def test_turning_it_off_stops_notifications(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        self.run_cli("notify", "off")
+        self.advance("foo", "v2\n")
+        self.assertEqual(self.run_cli("check-updates", "--force")["skipped"], "disabled")
+        self.assertEqual(self.notifications(), [])
+
+    def test_cleanup_forgets_the_preference(self):
+        self.run_cli("notify", "on")
+        self.assertTrue(self.run_cli("cleanup")["ok"])
+        self.assertFalse(self.run_cli("settings")["notify"])
+
+    # -- the once-a-day window --------------------------------------------------
+    def last_check_file(self):
+        return f"{self.home}/.local/state/extra-themes-browser/last-check.json"
+
+    def test_checks_at_most_once_a_day(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        first = self.run_cli("check-updates")
+        self.assertNotIn("skipped", first)
+        self.advance("foo", "v2\n")                                           # new update, but we just looked
+        second = self.run_cli("check-updates")
+        self.assertEqual(second["skipped"], "checked recently")
+        self.assertEqual(self.notifications(), [])
+
+    def test_checks_again_after_a_day(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        self.run_cli("check-updates")
+        self.advance("foo", "v2\n")
+        self.write(self.last_check_file(), json.dumps({"at": __import__("time").time() - 25 * 3600}))
+        self.assertEqual(self.run_cli("check-updates")["notified"], ["foo"])
+
+    def test_turning_it_on_does_not_wait_out_an_old_check(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        self.run_cli("check-updates")
+        self.run_cli("notify", "off")
+        self.run_cli("notify", "on")
+        self.advance("foo", "v2\n")
+        self.assertEqual(self.run_cli("check-updates")["notified"], ["foo"])
+
+    def test_a_failed_send_does_not_start_the_day_window(self):
+        self.add_theme("foo")
+        self.advance("foo", "v2\n")
+        self.run_cli("notify", "on")
+        open(self.fail_flag, "w").close()
+        self.assertFalse(self.run_cli("check-updates")["ok"])
+        self.assertFalse(os.path.exists(self.last_check_file()))
+        os.remove(self.fail_flag)
+        self.assertEqual(self.run_cli("check-updates")["notified"], ["foo"])   # retried without --force
+
+    def test_a_corrupt_timestamp_is_ignored(self):
+        self.add_theme("foo")
+        self.run_cli("notify", "on")
+        self.write(self.last_check_file(), "not json")
+        self.assertNotIn("skipped", self.run_cli("check-updates"))
 
 
 class ActiveTheme(Sandbox):

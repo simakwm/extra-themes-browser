@@ -37,8 +37,8 @@ Item {
 
   // settings view
   property string view: "browse"         // browse | settings
-  property var settings: ({ bar: { section: "hidden", index: 0, count: 0 }, menu: false, shortcut: "", suggested: "" })
-  property int settingsRow: 0            // 0 bar icon · 1 menu entry · 2 shortcut
+  property var settings: ({ bar: { section: "hidden", index: 0, count: 0 }, menu: false, shortcut: "", suggested: "", notify: false })
+  property int settingsRow: 0            // 0 bar icon · 1 menu entry · 2 shortcut · 3 update notifications · 4 remove
   property bool editingShortcut: false
   property bool cleanupPending: false    // waiting for the confirming second Enter
   property string shortcutDraft: ""
@@ -313,6 +313,11 @@ Item {
       settings.menu ? "Removed from the Omarchy menu" : "Added to the Omarchy menu under Style › Extra Themes")
   }
 
+  function toggleNotify() {
+    change(["notify", settings.notify ? "off" : "on"],
+      settings.notify ? "Update notifications turned off" : "You will be notified when installed themes have updates")
+  }
+
   function startShortcutEdit() {
     shortcutDraft = settings.shortcut || settings.suggested || ""
     editingShortcut = true
@@ -354,7 +359,7 @@ Item {
     }
 
     if (cleanupPending) {
-      if (settingsRow === 3 && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { runCleanup(); return }
+      if (settingsRow === 4 && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) { runCleanup(); return }
       cleanupPending = false
       clearMessage()
       if (event.key === Qt.Key_Escape) return
@@ -362,8 +367,9 @@ Item {
 
     if (event.key === Qt.Key_Escape || (ctrl && event.key === Qt.Key_Comma)) closeSettings()
     else if (event.key === Qt.Key_Up) settingsRow = Math.max(0, settingsRow - 1)
-    else if (event.key === Qt.Key_Down || event.key === Qt.Key_Tab) settingsRow = Math.min(3, settingsRow + 1)
-    else if (settingsRow === 3 && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) requestCleanup()
+    else if (event.key === Qt.Key_Down || event.key === Qt.Key_Tab) settingsRow = Math.min(4, settingsRow + 1)
+    else if (settingsRow === 3 && (event.key === Qt.Key_Left || event.key === Qt.Key_Right || event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space)) toggleNotify()
+    else if (settingsRow === 4 && (event.key === Qt.Key_Return || event.key === Qt.Key_Enter)) requestCleanup()
     else if (event.key === Qt.Key_Backtab) settingsRow = Math.max(0, settingsRow - 1)
     else if (settingsRow === 0 && (event.key === Qt.Key_Left || event.key === Qt.Key_Right)) {
       var d = event.key === Qt.Key_Left ? -1 : 1
@@ -817,15 +823,46 @@ Item {
               }
             }
           }
-          // 3 — clean up before removing the plugin
+          // 3 — update notifications
+          Rectangle {
+            width: parent.width
+            height: notifyCol.implicitHeight + Style.space(24)
+            radius: root.cornerRadius
+            color: root.settingsRow === 3 ? root.selectedBackground : "transparent"
+            border.width: 1
+            border.color: root.settingsRow === 3 ? root.accent : root.border
+            MouseArea { anchors.fill: parent; onClicked: root.settingsRow = 3 }
+            Column {
+              id: notifyCol
+              anchors { left: parent.left; right: parent.right; top: parent.top; margins: Style.space(12) }
+              spacing: Style.space(8)
+              Text { text: "Update notifications"; color: root.foreground; font.family: root.fontFamily; font.pixelSize: Style.font.title; font.bold: true }
+              Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Get a desktop notification when an installed theme has new updates. Checked in the background once a day, and announced once per update; clicking the notification opens this popup."
+                color: root.foreground; opacity: 0.65; font.family: root.fontFamily; font.pixelSize: Style.font.bodySmall
+              }
+              ActionButton {
+                label: root.settings.notify ? "✔ Notifications on  ⏎ turn off" : "Notifications off  ⏎ turn on"
+                ink: root.settings.notify ? root.background : root.foreground
+                fill: root.settings.notify ? root.accent : "transparent"
+                outline: root.settings.notify ? root.accent : root.border
+                family: root.fontFamily
+                onClicked: { root.settingsRow = 3; root.toggleNotify() }
+              }
+            }
+          }
+
+          // 4 — clean up before removing the plugin
           Rectangle {
             width: parent.width
             height: cleanCol.implicitHeight + Style.space(24)
             radius: root.cornerRadius
-            color: root.settingsRow === 3 ? root.selectedBackground : "transparent"
+            color: root.settingsRow === 4 ? root.selectedBackground : "transparent"
             border.width: 1
-            border.color: root.settingsRow === 3 ? root.urgent : root.border
-            MouseArea { anchors.fill: parent; onClicked: root.settingsRow = 3 }
+            border.color: root.settingsRow === 4 ? root.urgent : root.border
+            MouseArea { anchors.fill: parent; onClicked: root.settingsRow = 4 }
             Column {
               id: cleanCol
               anchors { left: parent.left; right: parent.right; top: parent.top; margins: Style.space(12) }
@@ -842,7 +879,7 @@ Item {
                 ink: root.cleanupPending ? root.background : root.urgent
                 fill: root.cleanupPending ? root.urgent : "transparent"
                 outline: root.urgent; family: root.fontFamily
-                onClicked: { root.settingsRow = 3; if (root.cleanupPending) root.runCleanup(); else root.requestCleanup() }
+                onClicked: { root.settingsRow = 4; if (root.cleanupPending) root.runCleanup(); else root.requestCleanup() }
               }
             }
           }

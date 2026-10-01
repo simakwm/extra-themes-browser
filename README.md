@@ -62,6 +62,9 @@ pick Left, Center or Right.
 - A spinner on the card while it works, and a status line with the result or the
   error. Success messages fade after a few seconds, errors stay longer.
 - Update checks run in the background when the popup opens.
+- **Update notifications** (off by default): a desktop notification when an
+  installed theme gets new commits upstream, once per update. Clicking the
+  notification opens the popup. Turn it on in Settings.
 
 **Preview**
 - A ⤢ icon on every card opens a **fullscreen preview** of that theme. Browse
@@ -119,11 +122,11 @@ pick Left, Center or Right.
 
 | Key | Action |
 |---|---|
-| `↑` `↓` (or `Tab` / `Shift+Tab`) | move between the four options |
+| `↑` `↓` (or `Tab` / `Shift+Tab`) | move between the five options |
 | `←` `→` | top bar icon: cycle Hidden, Left, Center, Right |
 | `Shift+←` `Shift+→` | top bar icon: move it earlier / later in its section |
-| `Enter` | menu entry: add or remove. Shortcut: start editing. Remove integrations: ask to confirm, then confirm |
-| `Space` | menu entry: add or remove |
+| `Enter` | menu entry and update notifications: toggle. Shortcut: start editing. Remove integrations: ask to confirm, then confirm |
+| `←` `→` / `Space` | menu entry and update notifications: turn on or off |
 | `Del` / `Backspace` | shortcut: remove it |
 | `Esc` or `Ctrl+,` | back to the theme list |
 
@@ -151,8 +154,14 @@ or anywhere else to go back.
   is named. The popup suggests a free combination, requires at least one of
   `SUPER`, `CTRL` or `ALT`, and rolls `bindings.lua` back if Hyprland reports an
   error after reloading.
-- **Remove integrations**: removes the bar icon, menu entry, shortcut, favorites
-  and cache. Run it before uninstalling the plugin.
+- **Update notifications**: off by default. When on, a background service checks
+  your installed themes once a day (the first check comes shortly after you
+  log in, and after turning it on) and sends one notification per new upstream
+  commit, grouping several themes into a single notification. Nothing is fetched
+  while it is off.
+- **Remove integrations**: removes the bar icon, menu entry, shortcut,
+  notification settings, favorites and cache. Run it before uninstalling the
+  plugin.
 
 ## What it touches
 
@@ -165,10 +174,12 @@ Nothing outside the plugin's own folder is changed unless you ask for it.
 | `~/.config/omarchy/extensions/omarchy-menu.jsonc` | the menu entry (a marked block) |
 | `~/.config/hypr/bindings.lua` | the shortcut (a marked block) |
 | `~/.cache/extra-themes-browser/` | cached theme list |
-| `~/.local/state/extra-themes-browser/` | your favorites |
+| `~/.local/state/extra-themes-browser/` | your favorites, the notification setting and which updates were already announced |
 
 Network access: `omarchy.org` (theme list and previews) and the GitHub
-repositories of the themes you install or update.
+repositories of the themes you install or update. With update notifications
+on, the background service also runs `git fetch` on your installed themes once
+a day.
 
 Themes are installed with `omarchy theme install`, so Omarchy's own rules about
 what a cloned theme may contain apply. Like every Omarchy plugin, this one runs

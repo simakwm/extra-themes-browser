@@ -15,6 +15,9 @@
   menu <on|off>         add/remove the Omarchy menu entry
   shortcut-set <combo>  register a Hyprland shortcut, e.g. "SUPER + CTRL + T"
   shortcut-clear        remove the shortcut
+  notify <on|off>       notify when installed themes have new updates
+  check-updates [--force]  (run hourly by the plugin's service) at most once a day, fetch
+                        and notify about new theme updates
   cleanup               remove the bar icon, menu entry, shortcut, favorites and cache
 """
 import concurrent.futures as cf
@@ -126,22 +129,27 @@ def catalog(refresh):
     return out
 
 
-def behind(slug):
+def upstream_sha(slug):
+    """Commit the theme's upstream is at, if that is ahead of what is installed; else ''."""
     d = f"{THEMES}/{slug}"
     try:
         subprocess.run(["git", "-C", d, "fetch", "--quiet"], timeout=30, check=True,
                        stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         n = subprocess.run(["git", "-C", d, "rev-list", "--count", "HEAD..@{u}"],
                            capture_output=True, text=True, timeout=10).stdout.strip()
-        return int(n or 0) > 0
+        if int(n or 0) <= 0:
+            return ""
+        return subprocess.run(["git", "-C", d, "rev-parse", "@{u}"],
+                              capture_output=True, text=True, timeout=10).stdout.strip()
     except Exception:
-        return False
+        return ""
 
 
 def status():
-    slugs = [os.path.basename(d) for d in os.listdir(THEMES) if is_git_theme(d)] if os.path.isdir(THEMES) else []
+    slugs = [os.path.basename(d) for d in os.listdir(THEMES) if is_git_theme(os.path.basename(d))] if os.path.isdir(THEMES) else []
     with cf.ThreadPoolExecutor(8) as ex:
-        return {"outdated": [s for s, b in zip(slugs, ex.map(behind, slugs)) if b]}
+        upstream = {s: sha for s, sha in zip(slugs, ex.map(upstream_sha, slugs)) if sha}
+    return {"outdated": sorted(upstream), "upstream": upstream}
 
 
 def run(cmd):
@@ -474,6 +482,96 @@ def suggest_shortcut():
     return ""
 
 
+PREFS_FILE = f"{STATE}/settings.json"
+NOTIFIED_FILE = f"{STATE}/notified.json"
+LAST_CHECK_FILE = f"{STATE}/last-check.json"
+CHECK_INTERVAL = 24 * 3600
+NOTIFY_GLYPH = "\U000F03D8"
+
+
+def read_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return default
+
+
+def prefs():
+    data = read_json(PREFS_FILE, {})
+    return data if isinstance(data, dict) else {}
+
+
+def notify_enabled():
+    return prefs().get("notifyUpdates") is True
+
+
+def notify_set(on):
+    data = prefs()
+    data["notifyUpdates"] = bool(on)
+    write_atomic(PREFS_FILE, json.dumps(data))
+    if on:
+        # Turning it on should not wait out a day-long window from an old check.
+        try:
+            os.remove(LAST_CHECK_FILE)
+        except OSError:
+            pass
+    return {"ok": True}
+
+
+def display_name(slug):
+    """Catalog name if cached, else the folder name made readable."""
+    for t in read_json(f"{CACHE}/catalog.json", []):
+        if isinstance(t, dict) and t.get("slug") == slug and t.get("name"):
+            return t["name"]
+    return slug.replace("-", " ").title()
+
+
+def send_update_notification(slugs):
+    names = [display_name(s) for s in slugs]
+    if len(names) == 1:
+        headline, body = f"{names[0]} has an update", "Open Extra Themes to update it."
+    else:
+        shown = ", ".join(names[:4]) + (f" and {len(names) - 4} more" if len(names) > 4 else "")
+        headline, body = f"{len(names)} themes have updates", shown
+    p = subprocess.run(
+        ["omarchy-notification-send", "--app-name", "Extra Themes", "-g", NOTIFY_GLYPH, headline, body,
+         "--exec", "omarchy-shell", "shell", "summon", PLUGIN_ID],
+        capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    return p.returncode == 0
+
+
+def check_updates(force=False):
+    """Called hourly by the plugin's service, but only looks at most once a day.
+    Notifies once per new upstream commit of each installed theme, and does no
+    network work at all while notifications are off or the last check is recent."""
+    if not notify_enabled():
+        return {"ok": True, "skipped": "disabled"}
+    stamp = read_json(LAST_CHECK_FILE, {})
+    last = stamp.get("at") if isinstance(stamp, dict) else None
+    if not force and isinstance(last, (int, float)) and 0 <= time.time() - last < CHECK_INTERVAL:
+        return {"ok": True, "skipped": "checked recently"}
+    current = status()["upstream"]
+    seen = read_json(NOTIFIED_FILE, {})
+    seen = seen if isinstance(seen, dict) else {}
+    fresh = sorted(s for s, sha in current.items() if seen.get(s) != sha)
+    # Forget themes that are no longer behind, so a later update notifies again.
+    keep = {s: sha for s, sha in seen.items() if s in current}
+    if fresh:
+        try:
+            sent = send_update_notification(fresh)
+        except (OSError, subprocess.TimeoutExpired):
+            sent = False
+        if not sent:
+            # Not recorded as checked, so the next hourly wake-up tries again.
+            write_atomic(NOTIFIED_FILE, json.dumps(keep))
+            return {"ok": False, "error": "could not send the notification", "outdated": sorted(current)}
+        keep.update({s: current[s] for s in fresh})
+    write_atomic(NOTIFIED_FILE, json.dumps(keep))
+    write_atomic(LAST_CHECK_FILE, json.dumps({"at": time.time()}))
+    return {"ok": True, "outdated": sorted(current), "notified": fresh}
+
+
 def cleanup():
     """Undo everything this plugin wrote outside its own folder, so that
     `omarchy plugin remove` leaves nothing dangling. Each step is attempted even
@@ -505,7 +603,8 @@ def cleanup():
 
 
 def settings():
-    return {"bar": bar_state(), "menu": menu_state(), "shortcut": current_shortcut(), "suggested": suggest_shortcut()}
+    return {"bar": bar_state(), "menu": menu_state(), "shortcut": current_shortcut(),
+            "suggested": suggest_shortcut(), "notify": notify_enabled()}
 
 
 def main(argv):
@@ -553,6 +652,10 @@ def main(argv):
         res = menu_set((args[0] if args else "") == "on")
     elif cmd == "shortcut-set":
         res = shortcut_set(args[0] if args else "")
+    elif cmd == "notify":
+        res = notify_set((args[0] if args else "") == "on")
+    elif cmd == "check-updates":
+        res = check_updates(force="--force" in args)
     elif cmd == "cleanup":
         res = cleanup()
     elif cmd == "shortcut-clear":

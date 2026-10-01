@@ -2,17 +2,22 @@
   "schemaVersion": 1,
   "id": "io.github.simakwm.extra-themes",
   "name": "Extra Themes",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "author": "simakwm",
   "license": "MIT",
   "homepage": "https://github.com/simakwm/extra-themes-browser",
   "repository": "https://github.com/simakwm/extra-themes-browser",
   "description": "Browse, search, install, uninstall, favorite, and update Omarchy extra themes from omarchy.org",
-  "kinds": ["overlay", "bar-widget"],
+  "kinds": [
+    "overlay",
+    "bar-widget",
+    "service"
+  ],
   "keepLoaded": true,
   "entryPoints": {
     "overlay": "ExtraThemes.qml",
-    "barWidget": "BarWidget.qml"
+    "barWidget": "BarWidget.qml",
+    "service": "Service.qml"
   },
   "barWidget": {
     "displayName": "Extra Themes",
