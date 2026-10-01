@@ -23,6 +23,11 @@ omarchy-shell shell toggle io.github.simakwm.extra-themes
 You can also place the icon on the bar, add a menu entry or register a
 shortcut from the popup itself: **⚙ Settings**, or `Ctrl+,`.
 
+**No icon on the bar?** `omarchy plugin enable` only places the icon when the
+plugin is not yet in your `shell.json`, so after a reinstall it may be enabled
+but not on the bar. Open the popup with the command above, go to **Settings →
+Top bar icon** and pick Left, Center or Right.
+
 ## Features
 
 **Browse and search**
