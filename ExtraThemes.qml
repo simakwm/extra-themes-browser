@@ -30,6 +30,10 @@ Item {
   property var outdated: []
   property var busy: ({})                // slug -> verb in progress
   property var filtered: []
+  property string sort: "default"       // default | az | za | random | stars
+  property var sortKeys: ({})           // slug -> float for stable random order
+  property var starCounts: ({})         // slug -> GitHub star count
+  property bool starsLoading: false
   // Responses can arrive out of order (each action reloads the catalog); only the
   // latest request of each kind may update the view.
   property int catalogSeq: 0
@@ -122,6 +126,34 @@ Item {
 
   Timer { id: messageTimer; onTriggered: root.clearMessage() }
 
+  // ── sort ───────────────────────────────────────────────────
+  readonly property var sortOptions: ["default", "az", "za", "random", "stars"]
+
+  function setSort(s) {
+    sort = s
+    if (s === "stars" && !starsLoading && Object.keys(starCounts).length === 0)
+      loadStars()
+    rebuild()
+    grid.positionViewAtBeginning()
+  }
+
+  function cycleSortOption() {
+    setSort(sortOptions[(sortOptions.indexOf(sort) + 1) % sortOptions.length])
+  }
+
+  function loadStars() {
+    starsLoading = true
+    call(["stars"], function(res) {
+      starsLoading = false
+      if (res && res.ok && res.stars) {
+        starCounts = res.stars
+        if (sort === "stars") rebuild()
+      } else {
+        notify((res && res.error) || "Could not fetch star counts", true)
+      }
+    })
+  }
+
   // ── backend calls ──────────────────────────────────────────
   Component {
     id: procFactory
@@ -144,6 +176,7 @@ Item {
   }
 
   function loadCatalog(force) {
+    if (force) sortKeys = {}
     loading = true
     var seq = ++catalogSeq
     call(force ? ["catalog", "--refresh"] : ["catalog"], function(rows) {
@@ -249,7 +282,6 @@ Item {
   function openRepo(t) {
     if (!t || t.repo.indexOf("https://github.com/") !== 0) return
     Quickshell.execDetached(["xdg-open", t.repo])
-    dismiss()
   }
 
   function openThemesFolder() {
@@ -424,10 +456,27 @@ Item {
       if (tab === "updates" && !isOutdated(t)) return false
       return !q || t.name.toLowerCase().indexOf(q) >= 0 || t.slug.indexOf(q) >= 0 || t.author.toLowerCase().indexOf(q) >= 0
     })
-    // Favorites first, then installed, then catalog order.
-    out = out.map(function(t, i) { return { t: t, i: i } }).sort(function(a, b) {
-      return (b.t.favorite - a.t.favorite) || (b.t.installed - a.t.installed) || (a.i - b.i)
-    }).map(function(x) { return x.t })
+    if (sort === "default") {
+      // Favorites first, then installed, then catalog order.
+      out = out.map(function(t, i) { return { t: t, i: i } }).sort(function(a, b) {
+        return (b.t.favorite - a.t.favorite) || (b.t.installed - a.t.installed) || (a.i - b.i)
+      }).map(function(x) { return x.t })
+    } else if (sort === "az") {
+      out = out.slice().sort(function(a, b) { return a.name.localeCompare(b.name) })
+    } else if (sort === "za") {
+      out = out.slice().sort(function(a, b) { return b.name.localeCompare(a.name) })
+    } else if (sort === "random") {
+      var keys = Object.assign({}, sortKeys)
+      out.forEach(function(t) { if (!(t.slug in keys)) keys[t.slug] = Math.random() })
+      sortKeys = keys
+      out = out.slice().sort(function(a, b) { return keys[a.slug] - keys[b.slug] })
+    } else if (sort === "stars") {
+      out = out.slice().sort(function(a, b) {
+        var sa = starCounts[a.slug] !== undefined ? starCounts[a.slug] : -1
+        var sb = starCounts[b.slug] !== undefined ? starCounts[b.slug] : -1
+        return sb - sa
+      })
+    }
     filtered = out
     if (previewIndex >= out.length) previewIndex = out.length - 1   // -1 closes it
 
@@ -473,12 +522,20 @@ Item {
     return label + " " + (name === "updates" && checking ? "…" : n)
   }
 
+  readonly property string sortLabel: {
+    if (sort === "az")     return "A → Z"
+    if (sort === "za")     return "Z → A"
+    if (sort === "random") return "⇄ Random"
+    if (sort === "stars")  return starsLoading ? "★ Stars…" : "★ Stars"
+    return "↕ Default"
+  }
+
   readonly property var hints: view === "settings"
     ? (editingShortcut
         ? [["⏎", "save"], ["Esc", "cancel"]]
         : [["↑↓", "select"], ["←→", "change"], ["⇧←→", "move icon"], ["⏎", "edit / toggle / confirm"], ["Del", "remove shortcut"], ["Esc", "back"]])
     : [["⏎", "install / apply"], ["^F", "favorite"], ["^D", "update"], ["^X", "remove"],
-       ["^P", "preview"], ["^O", "GitHub"], ["^T", "themes folder"], ["^,", "settings"], ["Tab", "filter"], ["^R", "refresh"], ["Esc", "close"]]
+       ["^P", "preview"], ["^O", "GitHub"], ["^T", "themes folder"], ["^,", "settings"], ["Tab", "filter"], ["^S", "sort"], ["^R", "refresh"], ["Esc", "close"]]
 
   PanelWindow {
     id: panel
@@ -536,6 +593,7 @@ Item {
           else if (ctrl && event.key === Qt.Key_Comma) root.openSettings()
           else if (ctrl && event.key === Qt.Key_T) root.openThemesFolder()
           else if (ctrl && event.key === Qt.Key_P) root.openPreview(root.selectedIndex)
+          else if (ctrl && event.key === Qt.Key_S) root.cycleSortOption()
           else if (ctrl && event.key === Qt.Key_R) { root.loadCatalog(true); root.checkUpdates() }
           else if (event.key === Qt.Key_Tab) root.cycleTab(1)
           else if (event.key === Qt.Key_Backtab) root.cycleTab(-1)
@@ -967,6 +1025,19 @@ Item {
         }
 
         ActionButton {
+          id: sortButton
+          visible: root.view === "browse"
+          anchors { right: themesFolderButton.left; rightMargin: root.gap; verticalCenter: tabRow.verticalCenter }
+          label: root.sortLabel; flat: root.sort === "default"
+          ink: root.sort !== "default" ? root.background : root.foreground
+          fill: root.sort !== "default" ? root.accent : "transparent"
+          outline: root.sort !== "default" ? root.accent : root.border
+          family: root.fontFamily
+          onClicked: root.cycleSortOption()
+        }
+
+        ActionButton {
+          id: themesFolderButton
           visible: root.view === "browse"
           anchors { right: settingsButton.left; rightMargin: root.gap; verticalCenter: tabRow.verticalCenter }
           label: "󰉋 Themes folder"; flat: true; ink: root.foreground; outline: root.border; family: root.fontFamily
@@ -989,7 +1060,7 @@ Item {
           GridView {
             id: grid
             anchors.fill: parent
-            anchors.rightMargin: Style.space(8)
+            anchors.rightMargin: Style.space(12)
             model: root.filtered.length
             clip: true
             cellWidth: Math.floor(width / root.columns)
@@ -1183,16 +1254,91 @@ Item {
             }
           }
 
-          // scroll indicator
-          Rectangle {
+          // interactive scrollbar
+          Item {
+            id: scrollbarArea
             visible: grid.contentHeight > grid.height
             anchors.right: parent.right
-            width: Style.space(3)
-            radius: width / 2
-            color: root.foreground
-            opacity: 0.35
-            y: grid.visibleArea.yPosition * parent.height
-            height: Math.max(Style.space(24), grid.visibleArea.heightRatio * parent.height)
+            anchors.top: parent.top
+            anchors.bottom: parent.bottom
+            width: Style.space(12)
+
+            readonly property real thumbY: grid.visibleArea.yPosition * height
+            readonly property real thumbH: Math.max(Style.space(24), grid.visibleArea.heightRatio * height)
+            readonly property real maxContentY: Math.max(0, grid.contentHeight - grid.height)
+            readonly property real trackRange: Math.max(1, height - thumbH)
+
+            Rectangle {
+              anchors.horizontalCenter: parent.horizontalCenter
+              anchors.top: parent.top; anchors.bottom: parent.bottom
+              width: Style.space(3); radius: width / 2
+              color: root.foreground; opacity: 0.12
+            }
+
+            Rectangle {
+              id: scrollThumb
+              anchors.horizontalCenter: parent.horizontalCenter
+              width: trackMouse.containsMouse || trackMouse.pressed ? Style.space(6) : Style.space(3)
+              y: scrollbarArea.thumbY
+              height: scrollbarArea.thumbH
+              radius: width / 2
+              color: root.foreground
+              opacity: trackMouse.pressed ? 0.75 : (trackMouse.containsMouse ? 0.55 : 0.35)
+              Behavior on opacity { NumberAnimation { duration: 150 } }
+              Behavior on width { NumberAnimation { duration: 150 } }
+            }
+
+            MouseArea {
+              id: trackMouse
+              anchors.fill: parent
+              hoverEnabled: true
+              cursorShape: Qt.SizeVerCursor
+
+              property bool dragging: false
+              property real dragAnchorY: 0
+              property real dragAnchorContentY: 0
+
+              onPressed: function(mouse) {
+                var onThumb = mouse.y >= scrollbarArea.thumbY &&
+                              mouse.y < scrollbarArea.thumbY + scrollbarArea.thumbH
+                if (onThumb) {
+                  dragging = true
+                  dragAnchorY = mouse.y
+                  dragAnchorContentY = grid.contentY
+                } else {
+                  dragging = false
+                  var ratio = (mouse.y - scrollbarArea.thumbH / 2) / scrollbarArea.trackRange
+                  grid.contentY = Math.max(0, Math.min(scrollbarArea.maxContentY,
+                    ratio * scrollbarArea.maxContentY))
+                }
+              }
+
+              onPositionChanged: function(mouse) {
+                if (!dragging || !pressed) return
+                var delta = mouse.y - dragAnchorY
+                grid.contentY = Math.max(0, Math.min(scrollbarArea.maxContentY,
+                  dragAnchorContentY + delta * scrollbarArea.maxContentY / scrollbarArea.trackRange))
+              }
+
+              onReleased: { dragging = false }
+            }
+          }
+
+          // wheel: 3 rows per notch (default Flickable step is too small for card-sized cells)
+          MouseArea {
+            anchors.fill: parent
+            acceptedButtons: Qt.NoButton
+            onWheel: function(wheel) {
+              var d = wheel.pixelDelta.y !== 0
+                ? wheel.pixelDelta.y * 2
+                : wheel.angleDelta.y / 120 * grid.cellHeight * 3
+              if (!d) return
+              grid.contentY = Math.max(0, Math.min(
+                grid.contentHeight - grid.height,
+                grid.contentY - d
+              ))
+              wheel.accepted = true
+            }
           }
 
           // empty / loading / error states

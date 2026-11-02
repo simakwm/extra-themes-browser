@@ -18,6 +18,8 @@
   notify <on|off>       notify when installed themes have new updates
   check-updates [--force]  (run hourly by the plugin's service) at most once a day, fetch
                         and notify about new theme updates
+  stars [--force]       fetch GitHub star counts for catalog themes (cached 24 h; partial
+                        results when GitHub rate-limits unauthenticated requests)
   cleanup               remove the bar icon, menu entry, shortcut, favorites and cache
 """
 import concurrent.futures as cf
@@ -175,6 +177,69 @@ def toggle_favorite(slug):
         favs = favorites() ^ {slug}
         write_atomic(f"{STATE}/favorites.json", json.dumps(sorted(favs)))
     return {"ok": True, "favorite": slug in favs}
+
+
+def stars(force):
+    """Return GitHub star counts for every catalog theme.  Results are cached per-slug
+    for 24 h in STATE/stars.json.  Slugs the GitHub API refused (rate-limited or network
+    error) are omitted so the caller can sort them last and retry on the next call."""
+    stars_path = f"{STATE}/stars.json"
+    try:
+        with open(stars_path) as f:
+            cache = json.load(f)
+    except (OSError, ValueError):
+        cache = {}
+
+    now = time.time()
+    result = {}
+    to_fetch = []
+    try:
+        items = fetch_catalog(False)
+    except Exception:
+        return {"ok": False, "error": "Catalog not loaded yet — open the browser or press Ctrl+R"}
+
+    for item in items:
+        slug = item["slug"]
+        entry = cache.get(slug, {})
+        if not force and entry.get("ts", 0) + TTL > now:
+            result[slug] = entry["stars"]
+        elif "github.com/" in item["repo"]:
+            to_fetch.append((slug, item["repo"]))
+
+    if to_fetch:
+        partial = False
+
+        def fetch_one(pair):
+            slug, repo = pair
+            try:
+                path = repo.rstrip("/").split("github.com/", 1)[1]
+                req = urllib.request.Request(
+                    f"https://api.github.com/repos/{path}",
+                    headers={"User-Agent": "extra-themes-browser",
+                             "Accept": "application/vnd.github.v3+json"},
+                )
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    return slug, json.loads(r.read()).get("stargazers_count", 0), False
+            except urllib.error.HTTPError as e:
+                return slug, None, e.code in (403, 429)
+            except Exception:
+                return slug, None, False
+
+        with cf.ThreadPoolExecutor(max_workers=8) as exe:
+            for slug, count, rate_limited in exe.map(fetch_one, to_fetch):
+                if rate_limited:
+                    partial = True
+                if count is not None:
+                    result[slug] = count
+                    cache[slug] = {"stars": count, "ts": now}
+
+        os.makedirs(STATE, exist_ok=True)
+        write_atomic(stars_path, json.dumps(cache))
+
+        if partial:
+            return {"ok": True, "stars": result, "partial": True}
+
+    return {"ok": True, "stars": result}
 
 
 # ── settings: bar icon, menu entry, shortcut ────────────────────────────────
@@ -686,6 +751,8 @@ def dispatch(argv):
         res = shortcut_set(args[0] if args else "")
     elif cmd == "notify":
         res = notify_set((args[0] if args else "") == "on")
+    elif cmd == "stars":
+        res = stars(force="--force" in args)
     elif cmd == "check-updates":
         res = check_updates(force="--force" in args)
     elif cmd == "cleanup":

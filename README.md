@@ -74,8 +74,7 @@ pick Left, Center or Right.
 ![Fullscreen preview](screenshots/fullscreen-preview.png)
 
 **Around the popup**
-- **Open on GitHub**: opens the theme's page and closes the popup so the page is
-  not hidden behind it.
+- **Open on GitHub**: opens the theme's page in the browser.
 - **Open the themes folder** (`~/.config/omarchy/themes`) in your file manager,
   also closing the popup.
 - **Top bar icon**: a swatch of the active theme's colors, placed where you
