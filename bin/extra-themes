@@ -56,6 +56,46 @@ ENTRY = re.compile(
     r'<span[^>]*>([^<]+)</span>'
 )
 SLUG_OK = re.compile(r"^[a-z0-9_][a-z0-9._+-]*$")
+# Only a bare https://github.com/<owner>/<repo> may become an API request: any extra
+# path (e.g. /tarball/ref) would select a different, possibly huge, endpoint.
+GITHUB_REPO = re.compile(
+    r"^https://github\.com/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))/([A-Za-z0-9._-]{1,100}?)(?:\.git)?/?$"
+)
+STARS_MAX_BYTES = 1 << 20   # repository metadata is a few KB
+STARS_DEADLINE = 15         # seconds per request, in total
+
+
+def github_repo(url):
+    """(owner, repo) for a canonical GitHub repository URL, else None."""
+    m = GITHUB_REPO.match(url)
+    if not m or m.group(2) in (".", ".."):
+        return None
+    return m.group(1), m.group(2)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None     # 3xx surfaces as HTTPError instead of being followed
+
+
+_api_opener = urllib.request.build_opener(_NoRedirect)
+
+
+def read_capped(resp, limit, deadline):
+    """Read at most `limit` bytes, failing past `limit` or after `deadline` (monotonic)."""
+    length = resp.headers.get("Content-Length")
+    if length and length.isdigit() and int(length) > limit:
+        raise ValueError("response too large")
+    buf = bytearray()
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("response too slow")
+        chunk = resp.read(min(65536, limit + 1 - len(buf)))
+        if not chunk:
+            return bytes(buf)
+        buf += chunk
+        if len(buf) > limit:
+            raise ValueError("response too large")
 
 
 def slug_of(repo):
@@ -203,23 +243,27 @@ def stars(force):
         entry = cache.get(slug, {})
         if not force and entry.get("ts", 0) + TTL > now:
             result[slug] = entry["stars"]
-        elif "github.com/" in item["repo"]:
-            to_fetch.append((slug, item["repo"]))
+        elif github_repo(item["repo"]):
+            to_fetch.append((slug, github_repo(item["repo"])))
 
     if to_fetch:
         partial = False
 
         def fetch_one(pair):
-            slug, repo = pair
+            slug, (owner, repo) = pair
             try:
-                path = repo.rstrip("/").split("github.com/", 1)[1]
                 req = urllib.request.Request(
-                    f"https://api.github.com/repos/{path}",
+                    f"https://api.github.com/repos/{owner}/{repo}",
                     headers={"User-Agent": "extra-themes-browser",
                              "Accept": "application/vnd.github.v3+json"},
                 )
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    return slug, json.loads(r.read()).get("stargazers_count", 0), False
+                deadline = time.monotonic() + STARS_DEADLINE
+                with _api_opener.open(req, timeout=10) as r:
+                    data = json.loads(read_capped(r, STARS_MAX_BYTES, deadline))
+                count = data.get("stargazers_count") if isinstance(data, dict) else None
+                if not isinstance(count, int) or isinstance(count, bool):
+                    return slug, None, False
+                return slug, count, False
             except urllib.error.HTTPError as e:
                 return slug, None, e.code in (403, 429)
             except Exception:

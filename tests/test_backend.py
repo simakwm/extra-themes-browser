@@ -887,5 +887,84 @@ class CleanupAll(Sandbox):
         self.assertTrue(self.run_cli("cleanup")["ok"])
 
 
+class GithubRepo(unittest.TestCase):
+    """Only canonical owner/repo URLs may turn into GitHub API requests."""
+
+    def test_canonical_forms(self):
+        for url in ("https://github.com/alice/foo", "https://github.com/alice/foo/",
+                    "https://github.com/alice/foo.git", "https://github.com/a-b/omarchy-x.y_z-theme"):
+            self.assertIsNotNone(_BE.github_repo(url), url)
+        self.assertEqual(_BE.github_repo("https://github.com/alice/foo.git"), ("alice", "foo"))
+
+    def test_rejects_extra_path_query_and_other_hosts(self):
+        for url in ("https://github.com/alice/foo/tarball/main", "https://github.com/alice/foo/zipball",
+                    "https://github.com/alice/foo?x=1", "https://github.com/alice/foo#x",
+                    "https://github.com/alice", "https://github.com/alice/..",
+                    "https://github.com/../foo", "https://github.com/alice/foo%2Fbar",
+                    "http://github.com/alice/foo", "https://github.com.evil/alice/foo",
+                    "https://gitlab.com/alice/foo"):
+            self.assertIsNone(_BE.github_repo(url), url)
+
+
+class CappedFetch(unittest.TestCase):
+    """The stars request reads bounded bytes and never follows redirects."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/big")
+                    self.end_headers()
+                    return
+                body = b'{"stargazers_count": 7}' if self.path == "/ok" else b"x" * (_BE.STARS_MAX_BYTES + 10)
+                self.send_response(200)
+                if self.path != "/big-nolength":
+                    self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        cls.srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = f"http://127.0.0.1:{cls.srv.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+        cls.srv.server_close()
+
+    def fetch(self, path, deadline=30):
+        with _BE._api_opener.open(self.base + path, timeout=5) as r:
+            return _BE.read_capped(r, _BE.STARS_MAX_BYTES, time.monotonic() + deadline)
+
+    def test_small_response_is_read(self):
+        self.assertEqual(json.loads(self.fetch("/ok")), {"stargazers_count": 7})
+
+    def test_oversize_with_length_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.fetch("/big")
+
+    def test_oversize_without_length_is_rejected(self):
+        with self.assertRaises(ValueError):
+            self.fetch("/big-nolength")
+
+    def test_redirect_is_not_followed(self):
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as cm:
+            self.fetch("/redirect")
+        self.assertEqual(cm.exception.code, 302)
+
+    def test_deadline_is_enforced(self):
+        with self.assertRaises(TimeoutError):
+            self.fetch("/ok", deadline=-1)
+
+
 if __name__ == "__main__":
     unittest.main()
